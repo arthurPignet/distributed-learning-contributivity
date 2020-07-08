@@ -108,9 +108,10 @@ class MultiPartnerLearning:
                     f"{list(zip(model.metrics_names, ['%.3f' % elem for elem in model_evaluation_test_data]))}")
 
         # Save model score on test data
-        self.test_score = model_evaluation_test_data[1]  # 0 is for the loss
+        self.test_score = model_evaluation[1]  # 0 is for the loss
+        self.nb_epochs_done = (es.stopped_epoch + 1) if self.is_early_stopping and es.stopped_epoch != 0 else self.epoch_count
         self.loss_collective_models.append(model_evaluation_test_data[0])  # store the loss for PVRL
-        self.nb_epochs_done = (es.stopped_epoch + 1) if self.is_early_stopping else self.epoch_count
+
 
         end = timer()
         self.learning_computation_time = end - start
@@ -209,13 +210,17 @@ class MultiPartnerLearning:
         self.test_score = model_evaluation_test_data[1]  # 0 is for the loss
         self.nb_epochs_done = self.epoch_index + 1
 
-        # Plot training history # TODO: move the data saving and plotting in dedicated functions
+        # Plot training history
+        # TODO: move the data saving and plotting in dedicated functions
         if self.is_save_data:
             self.save_data()
 
         self.save_final_model_weights(model_to_evaluate)
 
         logger.info("Training and evaluation on multiple partners: done.")
+
+        # saves the federated model weights
+        self.federated_model_weights=model_evaluation.get_weights()
 
         end = timer()
         self.learning_computation_time = end - start
@@ -247,9 +252,10 @@ class MultiPartnerLearning:
     def save_data(self):
         """Save figures, losses and metrics to disk"""
 
-        history_data = {"loss_collective_models": self.loss_collective_models,
-                        "score_matrix_per_partner": self.score_matrix_per_partner,
-                        "score_matrix_collective_models": self.score_matrix_collective_models}
+        history_data = {}
+        history_data["loss_collective_models"] = self.loss_collective_models
+        history_data["score_matrix_per_partner"] = self.score_matrix_per_partner
+        history_data["score_matrix_collective_models"] = self.score_matrix_collective_models
         with open(self.save_folder / "history_data.p", 'wb') as f:
             pickle.dump(history_data, f)
 
@@ -553,9 +559,20 @@ class MultiPartnerLearning:
 
         self.prepare_aggregation_weights()
         partners_model_list = []
-        for partner in self.partners_list:
+        for _ in self.partners_list:
             partners_model_list.append(self.build_model_from_weights(self.aggregate_model_weights()))
         return partners_model_list
+
+    def get_model(self):
+        """Return a model corresponding to the current learning approach"""
+
+        model = None
+        self.prepare_aggregation_weights()
+        if self.learning_approach == 'seq-pure':
+            model = self.build_model_from_weights(self.models_weights_list[self.partners_count - 1])
+        elif self.learning_approach in ['fedavg', 'seq-with-final-agg', 'seqavg']:
+            model = self.build_model_from_weights(self.aggregate_model_weights())
+        return model
 
     @staticmethod
     def fit_model(model_to_fit, train_data, val_data, batch_size, epoch_count=1):
