@@ -3,21 +3,18 @@
 Functions for model training and evaluation (single-partner and multi-partner cases)
 """
 
-import operator
 import os
-import pickle
 from timeit import default_timer as timer
-
-import matplotlib.pyplot as plt
-import numpy as np
+import pickle
+import keras
 from keras.backend.tensorflow_backend import clear_session
 from keras.callbacks import EarlyStopping
+import numpy as np
+import matplotlib.pyplot as plt
+import operator
 from loguru import logger
-from sklearn.externals.joblib import dump, load
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import log_loss
 
-from . import constants
+import constants
 
 
 class MultiPartnerLearning:
@@ -29,11 +26,10 @@ class MultiPartnerLearning:
                  dataset,
                  multi_partner_learning_approach,
                  aggregation_weighting="uniform",
+                 folder_for_starting_model=None,
                  is_early_stopping=True,
                  is_save_data=False,
                  save_folder="",
-                 init_model_from="random_initialization",
-                 use_saved_weights=False,
                  ):
 
         # Attributes related to partners
@@ -43,10 +39,7 @@ class MultiPartnerLearning:
         # Attributes related to the data and the model
         self.val_data = (dataset.x_val, dataset.y_val)
         self.test_data = (dataset.x_test, dataset.y_test)
-        self.dataset_name = dataset.name
         self.generate_new_model = dataset.generate_new_model
-        self.init_model_from = init_model_from
-        self.use_saved_weights = use_saved_weights
 
         # Attributes related to the multi-partner learning approach
         self.learning_approach = multi_partner_learning_approach
@@ -64,9 +57,9 @@ class MultiPartnerLearning:
         self.minibatched_y_train = [None] * self.partners_count
         self.aggregation_weights = []
         self.models_weights_list = [None] * self.partners_count
+        self.federated_model_weights = weights_for_starting_model
         self.scores_last_learning_round = [None] * self.partners_count
-        self.score_matrix_per_partner = np.nan * np.zeros(
-            shape=(self.epoch_count, self.minibatch_count, self.partners_count))
+        self.score_matrix_per_partner = np.nan * np.zeros(shape=(self.epoch_count, self.minibatch_count, self.partners_count))
         self.score_matrix_collective_models = np.nan * np.zeros(shape=(self.epoch_count, self.minibatch_count + 1))
         self.loss_collective_models = []
         self.test_score = None
@@ -84,39 +77,44 @@ class MultiPartnerLearning:
         logger.info(f"## Training and evaluating model on partner with id #{partner.id}")
 
         # Initialize model
-        model = self.init_with_model()
+        model = self.generate_new_model()
 
         # Set if early stopping if needed
         cb = []
-        es = None
         if self.is_early_stopping:
             es = EarlyStopping(monitor='val_loss', mode='min', verbose=0, patience=constants.PATIENCE)
             cb.append(es)
 
         # Train model
         logger.info("   Training model...")
-        self.fit_model(model,
-                       (partner.x_train, partner.y_train),
-                       self.val_data,
-                       partner.batch_size,
-                       self.epoch_count,
-                       )
+        history = model.fit(
+            partner.x_train,
+            partner.y_train,
+            batch_size=partner.batch_size,
+            epochs=self.epoch_count,
+            verbose=0,
+            validation_data=self.val_data,
+            callbacks=cb,
+        )
+
+        # Reference the testset according to the scenario configuration
+        x_test, y_test = self.test_data
 
         # Evaluate trained model
-        model_evaluation_test_data = self.evaluate_model(model, self.test_data)
+        model_evaluation = model.evaluate(x_test, y_test, batch_size=constants.DEFAULT_BATCH_SIZE, verbose=0)
         logger.info(f"   Model evaluation on test data: "
-                    f"{list(zip(model.metrics_names, ['%.3f' % elem for elem in model_evaluation_test_data]))}")
+                    f"{list(zip(model.metrics_names, ['%.3f' % elem for elem in model_evaluation]))}")
 
         # Save model score on test data
         self.test_score = model_evaluation[1]  # 0 is for the loss
         self.nb_epochs_done = (es.stopped_epoch + 1) if self.is_early_stopping and es.stopped_epoch != 0 else self.epoch_count
-        self.loss_collective_models.append(model_evaluation_test_data[0])  # store the loss for PVRL
+        self.loss_collective_models.append(model_evaluation[0])  # store the loss for PVRL
 
 
         end = timer()
         self.learning_computation_time = end - start
 
-    def compute_test_score(self):
+    def compute_test_score(self, start_from_federated_model=False, ):
         """Return the score on test data of a final aggregated model trained in a federated way on each partner"""
 
         start = timer()
@@ -127,6 +125,9 @@ class MultiPartnerLearning:
         epoch_count = self.epoch_count
         minibatch_count = self.minibatch_count
         is_early_stopping = self.is_early_stopping
+
+        x_val, y_val = self.val_data
+        x_test, y_test = self.test_data
 
         # First, if only one partner, fall back to dedicated single partner function
         if partners_count == 1:
@@ -140,11 +141,18 @@ class MultiPartnerLearning:
         # Initialize variables
         model_to_evaluate, sequentially_trained_model = None, None
         if self.learning_approach in ['seq-pure', 'seq-with-final-agg']:
-            if self.use_saved_weights:
-                logger.info("(seq) Init models with previous coalition model for each partner")
+            if not self.federated_model_weights:
+                sequentially_trained_model = self.generate_new_model()
             else:
-                logger.info("(seq) Init new models for each partner")
-            sequentially_trained_model = self.init_with_model()
+                sequentially_trained_model = self.build_model_from_weights(self.federated_model_weights)
+        else:
+            if not self.federated_model_weights:
+                new_model = self.generate_new_model()
+                for i in range(self.partners_count):
+                    self.models_weights_list[i] = new_model.get_weights()
+            else:
+                self.models_weights_list = [self.federated_model_weights] * self.partners_count
+         
 
         # Train model (iterate for each epoch and mini-batch)
         for epoch_index in range(epoch_count):
@@ -178,17 +186,18 @@ class MultiPartnerLearning:
                 model_to_evaluate = sequentially_trained_model
             elif self.learning_approach in ['fedavg', 'seq-with-final-agg', 'seqavg']:
                 model_to_evaluate = self.build_model_from_weights(self.aggregate_model_weights())
+            model_evaluation = model_to_evaluate.evaluate(
+                x_val, y_val, batch_size=constants.DEFAULT_BATCH_SIZE, verbose=0,
+            )
 
-            model_evaluation_val_data = self.evaluate_model(model_to_evaluate, self.val_data)
-
-            current_val_loss = model_evaluation_val_data[0]
-            current_val_metric = model_evaluation_val_data[1]
+            current_val_loss = model_evaluation[0]
+            current_val_metric = model_evaluation[1]
 
             self.score_matrix_collective_models[epoch_index, minibatch_count] = current_val_metric
             self.loss_collective_models.append(current_val_loss)
 
             logger.info(f"   Model evaluation at the end of the epoch: "
-                        f"{['%.3f' % elem for elem in model_evaluation_val_data]}")
+                        f"{['%.3f' % elem for elem in model_evaluation]}")
 
             logger.debug("      Checking if early stopping criteria are met:")
             if is_early_stopping:
@@ -204,50 +213,24 @@ class MultiPartnerLearning:
 
         # After last epoch or if early stopping was triggered, evaluate model on the global testset
         logger.info("### Evaluating model on test data:")
-        model_evaluation_test_data = self.evaluate_model(model_to_evaluate, self.test_data)
+        model_evaluation = model_to_evaluate.evaluate(
+            x_test, y_test, batch_size=constants.DEFAULT_BATCH_SIZE, verbose=0)
         logger.info(f"   Model metrics names: {model_to_evaluate.metrics_names}")
-        logger.info(f"   Model metrics values: {['%.3f' % elem for elem in model_evaluation_test_data]}")
-        self.test_score = model_evaluation_test_data[1]  # 0 is for the loss
+        logger.info(f"   Model metrics values: {['%.3f' % elem for elem in model_evaluation]}")
+        self.test_score = model_evaluation[1]  # 0 is for the loss
         self.nb_epochs_done = self.epoch_index + 1
 
-        # Plot training history
-        # TODO: move the data saving and plotting in dedicated functions
+        # Plot training history # TODO: move the data saving and plotting in dedicated functions
         if self.is_save_data:
             self.save_data()
 
-        self.save_final_model_weights(model_to_evaluate)
-
         logger.info("Training and evaluation on multiple partners: done.")
-
+        
         # saves the federated model weights
-        self.federated_model_weights=model_evaluation.get_weights()
-
+        self.federated_model_weights=model_to_evaluate.get_weights()
+        
         end = timer()
         self.learning_computation_time = end - start
-
-    def save_final_model_weights(self, model_to_save):
-        """Save final model weights"""
-
-        model_folder = os.path.join(self.save_folder, 'model')
-
-        if not os.path.isdir(model_folder):
-            os.makedirs(model_folder)
-
-        if isinstance(model_to_save, type(LogisticRegression())):
-            dump(model_to_save, os.path.join(model_folder, self.dataset_name + '_final_weights.joblib'))
-            coefs = np.array(model_to_save.coef_)
-            intercepts = np.array(model_to_save.intercept_)
-
-            np.savez(os.path.join(model_folder, self.dataset_name + '_final_weights.npy'),
-                     coefs=coefs,
-                     intercepts=intercepts,
-                     )
-
-        else:
-            model_to_save.save_weights(os.path.join(model_folder, self.dataset_name + '_final_weights.h5'))
-            model_weights = model_to_save.get_weights()
-
-            np.save(os.path.join(model_folder, self.dataset_name + '_final_weights.npy'), model_weights)
 
     def save_data(self):
         """Save figures, losses and metrics to disk"""
@@ -288,6 +271,7 @@ class MultiPartnerLearning:
         plt.savefig(self.save_folder / "graphs/all_partners.png")
         plt.close()
 
+
     def compute_collaborative_round_fedavg(self):
         """Proceed to a collaborative round with a federated averaging approach"""
 
@@ -295,28 +279,21 @@ class MultiPartnerLearning:
 
         # Initialize variables
         epoch_index, minibatch_index = self.epoch_index, self.minibatch_index
-        is_very_first_minibatch = (epoch_index == 0 and minibatch_index == 0)
+        x_val, y_val = self.val_data
 
-        # Starting model for each partner is the aggregated model from the previous mini-batch iteration
-        if is_very_first_minibatch:  # Except for the very first mini-batch where it is a new model
-            if self.use_saved_weights:
-                logger.info(f"(fedavg) Very first minibatch of epoch n°{epoch_index}, "
-                            f"init models with previous coalition model for each partner")
-            else:
-                logger.info(f"(fedavg) Very first minibatch of epoch n°{epoch_index}, init new models for each partner")
-            partners_model_list_for_iteration = self.init_with_models()
-        else:
-            logger.info(f"(fedavg) Minibatch n°{minibatch_index} of epoch n°{epoch_index}, "
-                        f"init aggregated model for each partner with models from previous round")
-            partners_model_list_for_iteration = self.init_with_agg_models()
+        # Starting model for each partner is the aggregated model  
+        logger.debug(f"(fedavg) Minibatch n°{minibatch_index} of epoch n°{epoch_index}, "
+                     f"init aggregated model for each partner with models from previous round")
+        partners_model_list_for_iteration = self.init_with_agg_models()
 
         # Evaluate and store accuracy of mini-batch start model
         model_to_evaluate = partners_model_list_for_iteration[0]
-        model_evaluation_val_data = self.evaluate_model(model_to_evaluate, self.val_data)
-        self.score_matrix_collective_models[epoch_index, minibatch_index] = model_evaluation_val_data[1]
+        model_evaluation = model_to_evaluate.evaluate(x_val, y_val, batch_size=constants.DEFAULT_BATCH_SIZE, verbose=0)
+        self.score_matrix_collective_models[epoch_index, minibatch_index] = model_evaluation[1]
 
         # Iterate over partners for training each individual model
         for partner_index, partner in enumerate(self.partners_list):
+
             # Reference the partner's model
             partner_model = partners_model_list_for_iteration[partner_index]
 
@@ -325,15 +302,14 @@ class MultiPartnerLearning:
                 self.minibatched_x_train[partner_index][minibatch_index],
                 self.minibatched_y_train[partner_index][minibatch_index],
             )
-            history = self.fit_model(
+            history = self.collaborative_round_fit(
                 partner_model, train_data_for_fit_iteration, self.val_data, partner.batch_size)
 
             # Log results of the round
-            model_evaluation_val_data = history.history['val_accuracy'][0]
-            self.log_collaborative_round_partner_result(partner, partner_index, model_evaluation_val_data)
+            self.log_collaborative_round_partner_result(partner, partner_index, history.history["val_accuracy"][0])
 
             # Update the partner's model in the models' list
-            self.save_model_for_partner(partner_model, partner_index)
+            self.models_weights_list[partner_index] = partner_model.get_weights()
 
             # Update iterative results
             self.update_iterative_results(partner_index, history)
@@ -348,10 +324,12 @@ class MultiPartnerLearning:
         # Initialize variables
         epoch_index, minibatch_index = self.epoch_index, self.minibatch_index
         is_last_round = minibatch_index == self.minibatch_count - 1
+        x_val, y_val = self.val_data
 
         # Evaluate and store accuracy of mini-batch start model
-        model_evaluation_val_data = self.evaluate_model(sequentially_trained_model, self.val_data)
-        self.score_matrix_collective_models[epoch_index, minibatch_index] = model_evaluation_val_data[1]
+        model_evaluation = sequentially_trained_model.evaluate(
+            x_val, y_val, batch_size=constants.DEFAULT_BATCH_SIZE, verbose=0)
+        self.score_matrix_collective_models[epoch_index, minibatch_index] = model_evaluation[1]
 
         # Iterate over partners for training the model sequentially
         shuffled_indexes = np.random.permutation(self.partners_count)
@@ -365,16 +343,15 @@ class MultiPartnerLearning:
                 self.minibatched_x_train[partner_index][minibatch_index],
                 self.minibatched_y_train[partner_index][minibatch_index],
             )
-            history = self.fit_model(
+            history = self.collaborative_round_fit(
                 sequentially_trained_model, train_data_for_fit_iteration, self.val_data, partner.batch_size)
 
             # Log results of the round
-            model_evaluation_val_data = history.history['val_accuracy'][0]
-            self.log_collaborative_round_partner_result(partner, for_loop_idx, model_evaluation_val_data)
+            self.log_collaborative_round_partner_result(partner, for_loop_idx, history.history["val_accuracy"][0])
 
             # On final collaborative round, save the partner's model in the models' list
             if is_last_round:
-                self.save_model_for_partner(sequentially_trained_model, partner_index)
+                self.models_weights_list[partner_index] = sequentially_trained_model.get_weights()
 
             # Update iterative results
             self.update_iterative_results(partner_index, history)
@@ -388,29 +365,22 @@ class MultiPartnerLearning:
 
         # Initialize variables
         epoch_index, minibatch_index = self.epoch_index, self.minibatch_index
-        is_very_first_minibatch = (epoch_index == 0 and minibatch_index == 0)
+        x_val, y_val = self.val_data
 
-        # Starting model for each partner is the aggregated model from the previous collaborative round
-        if is_very_first_minibatch:  # Except for the very first mini-batch where it is a new model
-            if self.use_saved_weights:
-                logger.info(f"(seqavg) Very first minibatch of epoch n°{epoch_index}, "
-                            f"init model with previous coalition model for each partner")
-            else:
-                logger.info(f"(seqavg) Very first minibatch of epoch n°{epoch_index}, init new model for each partner")
-            model_for_round = self.init_with_model()
-        else:
-            logger.info(f"(seqavg) Minibatch n°{minibatch_index} of epoch n°{epoch_index}, "
-                        f"init model by aggregating models from previous round")
-            model_for_round = self.init_with_agg_model()
+        # Starting model for each partner is the aggregated model
+        logger.debug(f"(seqavg) Minibatch n°{minibatch_index} of epoch n°{epoch_index}, "
+                     f"init model by aggregating models from previous round")
+        model_for_round = self.init_with_agg_model()
 
         # Evaluate and store accuracy of mini-batch start model
-        model_evaluation_val_data = self.evaluate_model(model_for_round, self.val_data)
-        self.score_matrix_collective_models[epoch_index, minibatch_index] = model_evaluation_val_data[1]
+        model_evaluation = model_for_round.evaluate(x_val, y_val, batch_size=constants.DEFAULT_BATCH_SIZE, verbose=0)
+        self.score_matrix_collective_models[epoch_index, minibatch_index] = model_evaluation[1]
 
         # Iterate over partners for training each individual model
         shuffled_indexes = np.random.permutation(self.partners_count)
         logger.debug(f"(seqavg) Shuffled order for this seqavg collaborative round: {shuffled_indexes}")
         for for_loop_idx, partner_index in enumerate(shuffled_indexes):
+
             partner = self.partners_list[partner_index]
 
             # Train on partner local data set
@@ -418,15 +388,14 @@ class MultiPartnerLearning:
                 self.minibatched_x_train[partner_index][minibatch_index],
                 self.minibatched_y_train[partner_index][minibatch_index],
             )
-            history = self.fit_model(
+            history = self.collaborative_round_fit(
                 model_for_round, train_data_for_fit_iteration, self.val_data, partner.batch_size)
 
             # Log results
-            model_evaluation_val_data = history.history['val_accuracy'][0]
-            self.log_collaborative_round_partner_result(partner, for_loop_idx, model_evaluation_val_data)
+            self.log_collaborative_round_partner_result(partner, for_loop_idx, history.history["val_accuracy"][0])
 
             # Save the partner's model in the models' list
-            self.save_model_for_partner(model_for_round, partner_index)
+            self.models_weights_list[partner_index] = model_for_round.get_weights()
 
             # Update iterative results
             self.update_iterative_results(partner_index, history)
@@ -465,88 +434,30 @@ class MultiPartnerLearning:
     def aggregate_model_weights(self):
         """Aggregate model weights from the list of models, with a weighted average"""
 
-        # SKL models weigths are tuples while Keras model's weights are list
-        if type(self.models_weights_list[0]) is tuple:  # Check weights type for aggregation
-            # Unpack values
-            coefs = [weights[0] for weights in self.models_weights_list]
-            intercepts = [weights[1] for weights in self.models_weights_list]
+        weights_per_layer = list(zip(*self.models_weights_list))
+        new_weights = list()
 
-            agg_coef = np.average(np.array(coefs), axis=0, weights=self.aggregation_weights)
-            agg_intercepts = np.average(np.array(intercepts), axis=0, weights=self.aggregation_weights)
-
-            new_weights = (agg_coef, agg_intercepts)
-        else:
-            weights_per_layer = list(zip(*self.models_weights_list))
-            new_weights = list()
-
-            for weights_for_layer in weights_per_layer:
-                avg_weights_for_layer = np.average(
-                    np.array(weights_for_layer), axis=0, weights=self.aggregation_weights
-                )
-                new_weights.append(list(avg_weights_for_layer))
+        for weights_for_layer in weights_per_layer:
+            avg_weights_for_layer = np.average(
+                np.array(weights_for_layer), axis=0, weights=self.aggregation_weights
+            )
+            new_weights.append(list(avg_weights_for_layer))
 
         return new_weights
-
-    def save_model_for_partner(self, model, partner_index):
-        """save a model with weight"""
-        if isinstance(model, type(LogisticRegression())):
-            self.models_weights_list[partner_index] = (model.coef_, model.intercept_)
-        else:
-            self.models_weights_list[partner_index] = model.get_weights()
 
     def build_model_from_weights(self, new_weights):
         """Generate a new model initialized with weights passed as arguments"""
 
         new_model = self.generate_new_model()
-
-        if isinstance(new_model, type(LogisticRegression())):
-            new_model.coef_, new_model.intercept_ = new_weights
-        else:
-            new_model.set_weights(new_weights)
-        return new_model
-
-    def init_with_models(self):
-        """Return a list of newly generated models, one per partner"""
-
-        # Init a list to receive a new model for each partner
-        partners_model_list = []
-
-        # Generate a new model and add it to the list
-        if self.use_saved_weights:
-            new_model = self.generate_new_model()
-            if isinstance(new_model, type(LogisticRegression())):
-                new_model = load(self.init_model_from)
-            else:
-                new_model.load_weights(self.init_model_from)
-        else:
-            new_model = self.generate_new_model()
-
-        # For each partner, create a new model and add it to the list
-        if isinstance(new_model, type(LogisticRegression())):
-            partners_model_list.append(new_model)
-            # For each remaining partner, create a new model and add it to the list
-            for i in range(len(self.partners_list) - 1):
-                partners_model_list.append(self.generate_new_model())
-        else:
-            partners_model_list.append(new_model)
-
-            # For each remaining partner, duplicate the new model and add it to the list
-            new_model_weights = new_model.get_weights()
-            for i in range(len(self.partners_list) - 1):
-                partners_model_list.append(self.build_model_from_weights(new_model_weights))
-
-        return partners_model_list
-
-    def init_with_model(self):
-        new_model = self.generate_new_model()
-
-        if self.use_saved_weights:
-            if isinstance(new_model, type(LogisticRegression())):
-                new_model = load(self.init_model_from)
-            else:
-                new_model.load_weights(self.init_model_from)
+        new_model.set_weights(new_weights)
+        new_model.compile(
+            loss=keras.losses.categorical_crossentropy,
+            optimizer="adam",
+            metrics=["accuracy"],
+        )
 
         return new_model
+
 
     def init_with_agg_model(self):
         """Return a new model aggregating models from model_list"""
@@ -559,68 +470,25 @@ class MultiPartnerLearning:
 
         self.prepare_aggregation_weights()
         partners_model_list = []
-        for _ in self.partners_list:
+        for partner in self.partners_list:
             partners_model_list.append(self.build_model_from_weights(self.aggregate_model_weights()))
         return partners_model_list
 
-    def get_model(self):
-        """Return a model corresponding to the current learning approach"""
-
-        model = None
-        self.prepare_aggregation_weights()
-        if self.learning_approach == 'seq-pure':
-            model = self.build_model_from_weights(self.models_weights_list[self.partners_count - 1])
-        elif self.learning_approach in ['fedavg', 'seq-with-final-agg', 'seqavg']:
-            model = self.build_model_from_weights(self.aggregate_model_weights())
-        return model
-
     @staticmethod
-    def fit_model(model_to_fit, train_data, val_data, batch_size, epoch_count=1):
+    def collaborative_round_fit(model_to_fit, train_data, val_data, batch_size):
         """Fit the model with arguments passed as parameters and returns the history object"""
 
         x_train, y_train = train_data
-        if isinstance(model_to_fit, type(LogisticRegression())):
-            history = model_to_fit.fit(x_train, y_train)
-            [loss, acc] = MultiPartnerLearning.evaluate_model(model_to_fit, train_data)
-            [val_loss, val_acc] = MultiPartnerLearning.evaluate_model(model_to_fit, val_data)
-            # Mimic Keras' history
-            history.history = {
-                'loss': [loss],
-                'accuracy': [acc],
-                'val_loss': [val_loss],
-                'val_accuracy': [val_acc]
-            }
-        else:
-            history = model_to_fit.fit(
-                x_train,
-                y_train,
-                batch_size=batch_size,
-                epochs=epoch_count,
-                verbose=0,
-                validation_data=val_data,
-            )
+        history = model_to_fit.fit(
+            x_train,
+            y_train,
+            batch_size=batch_size,
+            epochs=1,
+            verbose=0,
+            validation_data=val_data,
+        )
+
         return history
-
-    @staticmethod
-    def evaluate_model(model_to_evaluate, evaluation_data):
-        """Evaluate the model with arguments passed as parameters and returns [loss, accuracy]"""
-
-        x_eval, y_eval = evaluation_data
-
-        if isinstance(model_to_evaluate, type(LogisticRegression())):
-            if not hasattr(model_to_evaluate, 'coef_'):
-                model_evaluation = [0] * 2
-            else:
-                loss = log_loss(y_eval, model_to_evaluate.predict(x_eval))  # mimic keras model evaluation
-                accuracy = model_to_evaluate.score(x_eval, y_eval)
-                model_evaluation = [loss, accuracy]
-        else:
-            model_evaluation = model_to_evaluate.evaluate(x_eval,
-                                                          y_eval,
-                                                          batch_size=constants.DEFAULT_BATCH_SIZE,
-                                                          verbose=0,
-                                                          )
-        return model_evaluation
 
     def log_collaborative_round_partner_result(self, partner, partner_index, validation_score):
         """Print the validation accuracy of the collaborative round"""
@@ -644,18 +512,18 @@ class MultiPartnerLearning:
 
 
 def init_multi_partner_learning_from_scenario(scenario, is_save_data=True):
+
     mpl = MultiPartnerLearning(
         scenario.partners_list,
         scenario.epoch_count,
         scenario.minibatch_count,
         scenario.dataset,
         scenario.multi_partner_learning_approach,
+        scenario.folder_of_starting_model,
         scenario.aggregation_weighting,
         scenario.is_early_stopping,
         is_save_data,
         scenario.save_folder,
-        scenario.init_model_from,
-        scenario.use_saved_weights,
     )
 
     return mpl
