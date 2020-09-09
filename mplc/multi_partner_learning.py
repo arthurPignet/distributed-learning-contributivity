@@ -26,7 +26,7 @@ class MultiPartnerLearning:
                  dataset,
                  multi_partner_learning_approach,
                  aggregation_weighting="uniform",
-                 folder_for_starting_model=None,
+                 weights_for_starting_model=None,
                  is_early_stopping=True,
                  is_save_data=False,
                  save_folder="",
@@ -61,7 +61,7 @@ class MultiPartnerLearning:
         self.scores_last_learning_round = [None] * self.partners_count
         self.score_matrix_per_partner = np.nan * np.zeros(shape=(self.epoch_count, self.minibatch_count, self.partners_count))
         self.score_matrix_collective_models = np.nan * np.zeros(shape=(self.epoch_count, self.minibatch_count + 1))
-        self.loss_collective_models = []
+        self.loss_collective_models = [] 
         self.test_score = None
         self.nb_epochs_done = int
         self.is_save_data = is_save_data
@@ -107,14 +107,13 @@ class MultiPartnerLearning:
 
         # Save model score on test data
         self.test_score = model_evaluation[1]  # 0 is for the loss
-        self.nb_epochs_done = (es.stopped_epoch + 1) if self.is_early_stopping and es.stopped_epoch != 0 else self.epoch_count
         self.loss_collective_models.append(model_evaluation[0])  # store the loss for PVRL
-
+        self.nb_epochs_done = (es.stopped_epoch + 1) if self.is_early_stopping else self.epoch_count
 
         end = timer()
         self.learning_computation_time = end - start
 
-    def compute_test_score(self, start_from_federated_model=False, ):
+    def compute_test_score(self):
         """Return the score on test data of a final aggregated model trained in a federated way on each partner"""
 
         start = timer()
@@ -519,8 +518,8 @@ def init_multi_partner_learning_from_scenario(scenario, is_save_data=True):
         scenario.minibatch_count,
         scenario.dataset,
         scenario.multi_partner_learning_approach,
-        scenario.folder_of_starting_model,
         scenario.aggregation_weighting,
+        None,
         scenario.is_early_stopping,
         is_save_data,
         scenario.save_folder,
