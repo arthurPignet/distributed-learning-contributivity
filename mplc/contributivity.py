@@ -107,6 +107,7 @@ class Contributivity:
                 the_scenario.dataset,
                 the_scenario.multi_partner_learning_approach,
                 the_scenario.aggregation_weighting,
+                the_scenario.folder_for_starting_model,
                 is_early_stopping=True,
                 is_save_data=False,
                 save_folder=the_scenario.save_folder,
@@ -938,108 +939,11 @@ class Contributivity:
             end = timer()
             self.computation_time_sec = end - start
 
-    def federated_SBS_linear(self, the_scenario):
-        start = timer()
-        logger.info(
-            "# Launching computation of perf. scores of linear "
-            "performance increase compared to previous collective model")
-
-        relative_perf_matrix = self.compute_relative_perf_matrix(the_scenario)
-        comp_rounds_kept = relative_perf_matrix.shape[0]
-
-        # Calculate contributivity score with linear importance function
-        contributivity_scores = np.array(np.arange(comp_rounds_kept)) \
-            .dot(np.nan_to_num(relative_perf_matrix))
-
-        # Return contributivity scores
-        self.name = "Federated step by step linear scores"
-        self.contributivity_scores = contributivity_scores
-        self.normalized_scores = self.contributivity_scores / np.sum(
-            self.contributivity_scores
-        )
-        end = timer()
-        self.computation_time_sec = end - start
-
-    def federated_SBS_quadratic(self, the_scenario):
-        start = timer()
-        logger.info(
-            "# Launching computation of perf. scores of"
-            "quadratic performance increase compared to previous collective model")
-
-        relative_perf_matrix = self.compute_relative_perf_matrix(the_scenario)
-        comp_rounds_kept = relative_perf_matrix.shape[0]
-
-        # Calculate contributivity score with quadratic importance function
-        contributivity_scores = np.array(np.square(np.arange(comp_rounds_kept))) \
-            .dot(np.nan_to_num(relative_perf_matrix))
-
-        # Return contributivity scores
-        self.name = "Federated step by step quadratic scores"
-        self.contributivity_scores = contributivity_scores
-        self.normalized_scores = self.contributivity_scores / np.sum(
-            self.contributivity_scores
-        )
-        end = timer()
-        self.computation_time_sec = end - start
-
-    def federated_SBS_constant(self, the_scenario):
-        start = timer()
-        logger.info(
-            "# Launching computation of perf. scores of constant"
-            "performance increase compared to previous collective model")
-
-        relative_perf_matrix = self.compute_relative_perf_matrix(the_scenario)
-
-        # Calculate contributivity score as average of the relative performance for each round for each partner
-        contributivity_scores = np.nanmean(relative_perf_matrix, axis=0)
-
-        # Return contributivity scores
-        self.name = "Federated step by step constant scores"
-        self.contributivity_scores = contributivity_scores
-        self.normalized_scores = self.contributivity_scores / np.sum(
-            self.contributivity_scores
-        )
-        end = timer()
-        self.computation_time_sec = end - start
-
-    def compute_relative_perf_matrix(self, the_scenario):
-
-        # Define proportion of initial and final computation rounds to skip (default 10% each)
-        init_comp_rounds_skipped = 0.1
-        final_comp_rounds_skipped = 0.1
-
-        # Fetch score matrices from computation and scenario characteristics
-        multi_partner_learning = the_scenario.mpl
-        score_matrix_collective_models = multi_partner_learning.score_matrix_collective_models[:, 1:]
-        score_matrix_per_partner = multi_partner_learning.score_matrix_per_partner
-        partners_count = multi_partner_learning.partners_count
-        epoch_count = multi_partner_learning.epoch_count
-        minibatch_count = multi_partner_learning.minibatch_count
-
-        # Calculate first and last computation round kept for contributivity measure
-        first_comp_round_kept = int(np.round(epoch_count * minibatch_count * init_comp_rounds_skipped))
-        last_comp_round_kept = int(np.round(epoch_count * minibatch_count * (1 - final_comp_rounds_skipped)))
-
-        # Reshape scores matrices
-        scores_matrix_collective_reshape = np.reshape(score_matrix_collective_models,
-                                                      (epoch_count * minibatch_count))
-        score_matrix_per_partner_reshape = np.reshape(score_matrix_per_partner,
-                                                      (epoch_count * minibatch_count, partners_count))
-
-        # Calculate relative performance matrix
-        score_matrix_performance_rel = np.divide(score_matrix_per_partner_reshape,
-                                                 scores_matrix_collective_reshape[:, None])
-
-        # keep only the computation rounds that should not be skipped
-        relative_perf_matrix = score_matrix_performance_rel[first_comp_round_kept: last_comp_round_kept, :]
-
-        return relative_perf_matrix
-
     # %% compute Partner value by reinforocment learning
 
     def PVRL(self, the_scenario, learning_rate ):
         start = timer()
-        w = np.zeros(the_scenario.partners_count)
+        w = np.zeros(the_scenario.partners_count) 
         partner_values = np.exp(w) / (1.0 + np.exp(w))
         previous_partner_values  = np.zeros(the_scenario.partners_count)
         epsilon = 0.002
@@ -1064,10 +968,10 @@ class Contributivity:
             print("t:",t)
             print("partner_values:",partner_values)
             # Select the partner / the action
-            is_partner_in= np.random.binomial(  1, p=partner_values)
+            is_partner_in= np.random.binomial(  1, p=partner_values) 
             while np.sum(is_partner_in)==0 :
-                is_partner_in= np.random.binomial(  1, p=partner_values)
-
+                is_partner_in= np.random.binomial(  1, p=partner_values) 
+            
             # apply one epoch with the selected partner to the model/ do the action
             small_partner_list= [partner for partner, is_in in zip(the_scenario.partners_list,is_partner_in) if is_in == 1]
             mpl= multi_partner_learning.MultiPartnerLearning(
@@ -1085,8 +989,8 @@ class Contributivity:
             mpl.compute_test_score()
             weights_for_starting_model = mpl.federated_model_weights
             loss = mpl.loss_collective_models[-1]
-
-
+            
+            
             G =- loss + previous_loss
             dp_dw = np.exp(w) / (1+np.exp(w))**2
             prodp = np.prod (partner_values)
@@ -1099,7 +1003,7 @@ class Contributivity:
             previous_partner_values = partner_values
             partner_values = np.exp(w) / (1.0 + np.exp(w))
             previous_loss = loss
-
+            
         self.name = "PVRL"
         print(f"PVRL: the final accuracy is  {mpl.test_score}")
         self.contributivity_scores = partner_values
@@ -1109,8 +1013,6 @@ class Contributivity:
         )
         end = timer()
         self.computation_time_sec = end - start
-
-
 
     def compute_contributivity(
             self,
@@ -1160,24 +1062,7 @@ class Contributivity:
             self.PVRL(
                 current_scenario, learning_rate=0.2
             )
-        elif method_to_compute == "Federated SBS linear":
-            # Contributivity 11: step by step increments with linear importance increase
-            if current_scenario.multi_partner_learning_approach != "fedavg":
-                logger.warning("Step by step linear contributivity method is only suited for federated "
-                               "averaging learning approach")
-            self.federated_SBS_linear(current_scenario)
-        elif method_to_compute == "Federated SBS quadratic":
-            # Contributivity 12: step by step increments with quadratic importance increase
-            if current_scenario.multi_partner_learning_approach != "fedavg":
-                logger.warning("Step by step quadratic contributivity method is only suited for federated "
-                               "averaging learning approach")
-            self.federated_SBS_quadratic(current_scenario)
-        elif method_to_compute == "Federated SBS constant":
-            # Contributivity 13: step by step increments with constant importance
-            if current_scenario.multi_partner_learning_approach != "fedavg":
-                logger.warning("Step by step constant contributivity method is only suited for federated "
-                               "averaging learning approach")
-            self.federated_SBS_constant(current_scenario)
+
         else:
             logger.warning("Unrecognized name of method, statement ignored!")
 
