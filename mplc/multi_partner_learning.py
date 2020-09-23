@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import operator
 from loguru import logger
 
-import constants
+from . import constants
 
 
 class MultiPartnerLearning:
@@ -59,9 +59,10 @@ class MultiPartnerLearning:
         self.models_weights_list = [None] * self.partners_count
         self.federated_model_weights = weights_for_starting_model
         self.scores_last_learning_round = [None] * self.partners_count
-        self.score_matrix_per_partner = np.nan * np.zeros(shape=(self.epoch_count, self.minibatch_count, self.partners_count))
+        self.score_matrix_per_partner = np.nan * np.zeros(
+            shape=(self.epoch_count, self.minibatch_count, self.partners_count))
         self.score_matrix_collective_models = np.nan * np.zeros(shape=(self.epoch_count, self.minibatch_count + 1))
-        self.loss_collective_models = [] 
+        self.loss_collective_models = []
         self.test_score = None
         self.nb_epochs_done = int
         self.is_save_data = is_save_data
@@ -106,8 +107,8 @@ class MultiPartnerLearning:
                     f"{list(zip(model.metrics_names, ['%.3f' % elem for elem in model_evaluation]))}")
 
         # Save model score on test data
-        self.test_score = model_evaluation[1]  # 0 is for the loss
-        self.loss_collective_models.append(model_evaluation[0])  # store the loss for PVRL
+        self.test_score = model_evaluation_test_data[1]  # 0 is for the loss
+        self.loss_collective_models.append(model_evaluation_test_data[0])  # store the loss for PVRL
         self.nb_epochs_done = (es.stopped_epoch + 1) if self.is_early_stopping else self.epoch_count
 
         end = timer()
@@ -143,15 +144,9 @@ class MultiPartnerLearning:
             if not self.federated_model_weights:
                 sequentially_trained_model = self.generate_new_model()
             else:
-                sequentially_trained_model = self.build_model_from_weights(self.federated_model_weights)
-        else:
-            if not self.federated_model_weights:
-                new_model = self.generate_new_model()
-                for i in range(self.partners_count):
-                    self.models_weights_list[i] = new_model.get_weights()
-            else:
-                self.models_weights_list = [self.federated_model_weights] * self.partners_count
-         
+                logger.info("(seq) Init new models for each partner")
+            sequentially_trained_model = self.init_with_model()
+
 
         # Train model (iterate for each epoch and mini-batch)
         for epoch_index in range(epoch_count):
@@ -224,10 +219,8 @@ class MultiPartnerLearning:
             self.save_data()
 
         logger.info("Training and evaluation on multiple partners: done.")
-        
-        # saves the federated model weights
-        self.federated_model_weights=model_to_evaluate.get_weights()
-        
+
+
         end = timer()
         self.learning_computation_time = end - start
 
@@ -270,7 +263,6 @@ class MultiPartnerLearning:
         plt.savefig(self.save_folder / "graphs/all_partners.png")
         plt.close()
 
-
     def compute_collaborative_round_fedavg(self):
         """Proceed to a collaborative round with a federated averaging approach"""
 
@@ -292,7 +284,6 @@ class MultiPartnerLearning:
 
         # Iterate over partners for training each individual model
         for partner_index, partner in enumerate(self.partners_list):
-
             # Reference the partner's model
             partner_model = partners_model_list_for_iteration[partner_index]
 
@@ -379,7 +370,6 @@ class MultiPartnerLearning:
         shuffled_indexes = np.random.permutation(self.partners_count)
         logger.debug(f"(seqavg) Shuffled order for this seqavg collaborative round: {shuffled_indexes}")
         for for_loop_idx, partner_index in enumerate(shuffled_indexes):
-
             partner = self.partners_list[partner_index]
 
             # Train on partner local data set
@@ -457,7 +447,6 @@ class MultiPartnerLearning:
 
         return new_model
 
-
     def init_with_agg_model(self):
         """Return a new model aggregating models from model_list"""
 
@@ -511,7 +500,6 @@ class MultiPartnerLearning:
 
 
 def init_multi_partner_learning_from_scenario(scenario, is_save_data=True):
-
     mpl = MultiPartnerLearning(
         scenario.partners_list,
         scenario.epoch_count,
@@ -519,7 +507,6 @@ def init_multi_partner_learning_from_scenario(scenario, is_save_data=True):
         scenario.dataset,
         scenario.multi_partner_learning_approach,
         scenario.aggregation_weighting,
-        None,
         scenario.is_early_stopping,
         is_save_data,
         scenario.save_folder,

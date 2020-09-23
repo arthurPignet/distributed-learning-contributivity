@@ -5,7 +5,9 @@ This enables to parameterize the contributivity measurements to be performed.
 
 from __future__ import print_function
 
+
 import bisect
+import os
 import datetime
 from itertools import combinations
 from math import factorial
@@ -969,10 +971,9 @@ class Contributivity:
             print("t:",t)
             print("partner_values:",partner_values)
             # Select the partner / the action
-            is_partner_in= np.random.binomial(  1, p=partner_values)
-            while np.sum(is_partner_in)==0 :
-
-                is_partner_in= np.random.binomial(  1, p=partner_values)
+            is_partner_in = np.random.binomial(1, p=partner_values)
+            while np.sum(is_partner_in) == 0:
+                is_partner_in = np.random.binomial(1, p=partner_values)
 
             # apply one epoch with the selected partner to the previous model/ do the action
             small_partner_list= [partner for partner, is_in in zip(the_scenario.partners_list,is_partner_in) if is_in == 1]
@@ -993,10 +994,9 @@ class Contributivity:
             mpl.compute_test_score()
             loss = mpl.loss_collective_models[-1]
 
-
-            G =- loss + previous_loss
-            dp_dw = np.exp(w) / (1+np.exp(w))**2
-            prodp = np.prod (partner_values)
+            G = - loss + previous_loss
+            dp_dw = np.exp(w) / (1 + np.exp(w)) ** 2
+            prodp = np.prod(partner_values)
             # Update the weight according to the REINFORCE method
             new_w = np.zeros(the_scenario.partners_count)
             for i in range(the_scenario.partners_count):
@@ -1006,7 +1006,7 @@ class Contributivity:
             previous_partner_values = partner_values
             partner_values = np.exp(w) / (1.0 + np.exp(w))
             previous_loss = loss
-
+            
         self.name = "PVRL"
         print(f"PVRL: the final accuracy is  {mpl.test_score}")
         self.contributivity_scores = partner_values
@@ -1015,7 +1015,7 @@ class Contributivity:
             self.contributivity_scores
         )
         end = timer()
-        self.computation_time_sec = end - start
+        self.computation_time_sec = end - start       
 
     def compute_contributivity(
             self,
