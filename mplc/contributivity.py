@@ -108,10 +108,10 @@ class Contributivity:
                 the_scenario.dataset,
                 the_scenario.multi_partner_learning_approach,
                 the_scenario.aggregation_weighting,
-                the_scenario.folder_for_starting_model,
                 is_early_stopping=True,
                 is_save_data=False,
                 save_folder=the_scenario.save_folder,
+                init_model_from=the_scenario.init_model_from,
             )
             mpl.compute_test_score()
             self.charac_fct_values[tuple(subset)] = mpl.test_score
