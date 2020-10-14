@@ -37,7 +37,7 @@ Note: This is the temporary package for our library.
 
 ## Quick start
 
-First a few words of context ! This library enables to run a multi-partner learning and contributivity measurement experiment. This breaks down into three relatively independent blocks:
+First a few words of context! This library enables to run a multi-partner learning and contributivity measurement experiment. This breaks down into three relatively independent blocks:
 
 1. Creating a mock collaborative multi-partner learning scenario
 1. Running a multi-partner ML algorithm to learn a model on all partners respective 
@@ -399,7 +399,7 @@ dataset = dataset.Dataset(
 ```
 
 ### Model generator
-This function provides the model which will be trained by the scenario object. Currently the library handles compiled Keras' model (see MNIST, ESC50, IMDB and CIFAR10 datasets), and Scikit-Learn Linear Regression (see the TITANIC dataset)  
+This function provides the model which will be trained by the scenario object. Currently the library handles compiled Keras' model (see MNIST, ESC50, IMDB and CIFAR10 datasets), and Scikit-Learn Linear Regression (see the TITANIC dataset).  
 
 ```python
 def generate_new_model_for_dataset():
