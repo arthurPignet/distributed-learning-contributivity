@@ -940,7 +940,7 @@ class Contributivity:
             end = timer()
             self.computation_time_sec = end - start
 
-    # %% compute Partner value by reinforocment learning
+    # %% compute Partner value by reinforcement learning
 
     def PVRL(self, the_scenario, learning_rate):
         start = timer()
