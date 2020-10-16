@@ -103,7 +103,6 @@ class MultiPartnerLearning:
 
         model_evaluation_val_data = self.evaluate_model(model, self.val_data)
         current_val_loss = model_evaluation_val_data[0]
-        current_val_metric = model_evaluation_val_data[1]
         self.loss_collective_models.append(current_val_loss)
 
         # Evaluate trained model
